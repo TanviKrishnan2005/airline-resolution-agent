@@ -1,0 +1,760 @@
+import { useEffect, useState } from "react";
+
+import PassengerCard from "./components/PassengerCard";
+import FlightCard from "./components/FlightCard";
+import Chat from "./components/Chat";
+import ActionRecord from "./components/ActionRecord";
+
+import "./styles.css";
+
+const API_URL = "http://127.0.0.1:8000";
+
+export default function App() {
+  const [customers, setCustomers] = useState([]);
+  const [bookings, setBookings] = useState([]);
+
+  const [customer, setCustomer] = useState(null);
+
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+
+  // Actions for ONLY the current conversation
+  const [actions, setActions] = useState([]);
+
+  const [loading, setLoading] = useState(false);
+  const [dataLoading, setDataLoading] = useState(true);
+
+  // =========================================================
+  // LOAD DATA
+  // =========================================================
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  async function loadData() {
+    try {
+      const [customersResponse, bookingsResponse] =
+        await Promise.all([
+          fetch(`${API_URL}/customers`),
+          fetch(`${API_URL}/bookings`),
+        ]);
+
+      const customersData =
+        await customersResponse.json();
+
+      const bookingsData =
+        await bookingsResponse.json();
+
+      setCustomers(customersData);
+      setBookings(bookingsData);
+
+      if (customersData.length > 0) {
+        selectCustomer(
+          customersData[0],
+          bookingsData
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Failed to load data:",
+        error
+      );
+    } finally {
+      setDataLoading(false);
+    }
+  }
+
+  // =========================================================
+  // BOOKING LOOKUP
+  // =========================================================
+
+  function getPrimaryBooking(
+    customerData,
+    bookingsData = bookings
+  ) {
+    if (!customerData) return null;
+
+    const customerBookings =
+      bookingsData.filter(
+        (booking) =>
+          booking.pnr ===
+          customerData.booking_reference
+      );
+
+    // Prefer the disrupted booking
+    const disruptedBooking =
+      customerBookings.find(
+        (booking) =>
+          booking.status === "Cancelled" ||
+          booking.status === "Delayed"
+      );
+
+    return (
+      disruptedBooking ||
+      customerBookings[0] ||
+      null
+    );
+  }
+
+  // =========================================================
+  // CUSTOMER VIEW MODEL
+  // =========================================================
+
+  function getCustomerView(
+    customerData,
+    bookingsData = bookings
+  ) {
+    const booking =
+      getPrimaryBooking(
+        customerData,
+        bookingsData
+      );
+
+    if (!customerData || !booking) {
+      return null;
+    }
+
+    let from = "";
+    let to = "";
+
+    if (booking.route) {
+      const parts =
+        booking.route.split("→");
+
+      from =
+        parts[0]?.trim() || "";
+
+      to =
+        parts[1]?.trim() || "";
+    }
+
+    return {
+      name: customerData.name,
+
+      tier:
+        customerData.loyalty_tier,
+
+      pnr:
+        customerData.booking_reference,
+
+      flight:
+        booking.flight || "—",
+
+      route:
+        booking.route || "—",
+
+      from,
+      to,
+
+      date:
+        booking.date,
+
+      departure:
+        booking.scheduled_departure,
+
+      newDeparture:
+        booking.new_departure,
+
+      status:
+        booking.status,
+
+      statusType:
+        booking.status === "Cancelled"
+          ? "cancelled"
+          : booking.status === "Delayed"
+            ? "delayed"
+            : "normal",
+
+      delayHours:
+        booking.delay_hours || 0,
+    };
+  }
+
+  // =========================================================
+  // SELECT CUSTOMER
+  // =========================================================
+
+  function selectCustomer(
+    selectedCustomer,
+    bookingsData = bookings
+  ) {
+    setCustomer(selectedCustomer);
+
+    // Start a completely fresh conversation
+    setMessages([]);
+
+    // IMPORTANT:
+    // Do NOT load old actions from backend.
+    setActions([]);
+
+    setInput("");
+
+    getCustomerView(
+      selectedCustomer,
+      bookingsData
+    );
+  }
+
+  // =========================================================
+  // SEND MESSAGE
+  // =========================================================
+
+  async function sendMessage() {
+    const text = input.trim();
+
+    if (
+      !text ||
+      !customer ||
+      loading
+    ) {
+      return;
+    }
+
+    // -------------------------------------------------------
+    // Add user message
+    // -------------------------------------------------------
+
+    setMessages((previous) => [
+      ...previous,
+      {
+        role: "user",
+        text,
+      },
+    ]);
+
+    setInput("");
+    setLoading(true);
+
+    try {
+      // -----------------------------------------------------
+      // Send request to backend
+      // -----------------------------------------------------
+
+      const response =
+        await fetch(
+          `${API_URL}/chat`,
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body: JSON.stringify({
+              customer:
+                customer.name,
+
+              message: text,
+            }),
+          }
+        );
+
+      if (!response.ok) {
+        throw new Error(
+          `HTTP ${response.status}`
+        );
+      }
+
+      const data =
+        await response.json();
+
+      // -----------------------------------------------------
+      // Add agent response
+      // -----------------------------------------------------
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "agent",
+
+          text:
+            data.response ||
+            "I couldn't process that request.",
+        },
+      ]);
+
+      // -----------------------------------------------------
+      // IMPORTANT:
+      //
+      // data.actions contains ONLY the actions generated
+      // by THIS request.
+      //
+      // We append them to the current conversation.
+      // We do NOT fetch the global action log.
+      // -----------------------------------------------------
+
+      if (
+        Array.isArray(data.actions) &&
+        data.actions.length > 0
+      ) {
+        setActions((previous) => [
+          ...previous,
+          ...data.actions,
+        ]);
+      }
+    } catch (error) {
+      console.error(
+        "Chat error:",
+        error
+      );
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "agent",
+
+          text:
+            "I'm sorry, something went wrong while processing your request.",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // =========================================================
+  // RESOLUTION STEPS
+  // =========================================================
+
+  function getResolutionSteps() {
+    const booking =
+      getPrimaryBooking(customer);
+
+    if (!customer || !booking) {
+      return [
+        {
+          type: "waiting",
+          text: "Waiting for request",
+        },
+      ];
+    }
+
+    const hasMessages =
+      messages.length > 0;
+
+    const hasEscalation =
+      actions.some((action) =>
+        String(action.action || "")
+          .toLowerCase()
+          .includes("escal")
+      );
+
+    const hasResolution =
+      actions.some(
+        (action) =>
+          !String(action.action || "")
+            .toLowerCase()
+            .includes("escal")
+      );
+
+    const steps = [
+      {
+        type: "done",
+        text: "Customer identified",
+      },
+
+      {
+        type: "done",
+        text:
+          `Booking ${customer.booking_reference} verified`,
+      },
+    ];
+
+    // Nothing has been said yet
+    if (!hasMessages) {
+      steps.push({
+        type: "waiting",
+        text: "Waiting for request",
+      });
+
+      return steps;
+    }
+
+    // Customer has sent something
+    steps.push({
+      type: "done",
+      text: "Request understood",
+    });
+
+    // Escalation
+    if (hasEscalation) {
+      steps.push({
+        type: "warning",
+        text: "Human review required",
+      });
+    }
+
+    // Successful policy action
+    else if (hasResolution) {
+      steps.push({
+        type: "done",
+        text: "Policy action completed",
+      });
+    }
+
+    // Still processing / informational response
+    else {
+      steps.push({
+        type: "waiting",
+        text: "Processing request",
+      });
+    }
+
+    return steps;
+  }
+
+  // =========================================================
+  // POLICY SNAPSHOT
+  // =========================================================
+
+  function getPolicySnapshot() {
+    const booking =
+      getPrimaryBooking(customer);
+
+    if (!booking || !customer) {
+      return [];
+    }
+
+    // -------------------------------------------------------
+    // CANCELLATION
+    // -------------------------------------------------------
+
+    if (
+      booking.status ===
+      "Cancelled"
+    ) {
+      return [
+        "Airline-caused cancellation",
+        "Free rebooking within 24h",
+        "OR full refund",
+        "Refund to original payment method",
+        "Refund within 7 business days",
+        `${customer.loyalty_tier} → priority rebooking`,
+      ];
+    }
+
+    // -------------------------------------------------------
+    // DELAY
+    // -------------------------------------------------------
+
+    if (
+      booking.status ===
+      "Delayed"
+    ) {
+      const delay =
+        booking.delay_hours || 0;
+
+      const policy = [];
+
+      if (delay >= 3) {
+        policy.push(
+          "Meal voucher"
+        );
+
+        policy.push(
+          "Lounge access"
+        );
+      }
+
+      if (delay > 5) {
+        policy.push(
+          "Hotel for delayed hours only"
+        );
+      }
+
+      policy.push(
+        `${customer.loyalty_tier} → priority rebooking`
+      );
+
+      return policy;
+    }
+
+    // -------------------------------------------------------
+    // DEFAULT
+    // -------------------------------------------------------
+
+    return [
+      "Check booking",
+      "Apply airline policy",
+      "Execute permitted actions",
+      "Escalate restricted requests",
+    ];
+  }
+
+  // =========================================================
+  // LOADING SCREEN
+  // =========================================================
+
+  if (dataLoading) {
+    return (
+      <div className="loadingScreen">
+
+        <div className="planeBubble">
+          ✈
+        </div>
+
+        <strong>
+          Loading resolution desk...
+        </strong>
+
+      </div>
+    );
+  }
+
+  // =========================================================
+  // CUSTOMER VIEW
+  // =========================================================
+
+  const customerView =
+    getCustomerView(customer);
+
+  if (!customerView) {
+    return (
+      <div className="loadingScreen">
+        <strong>
+          No customer data available.
+        </strong>
+      </div>
+    );
+  }
+
+  const resolutionSteps =
+    getResolutionSteps();
+
+  const policySnapshot =
+    getPolicySnapshot();
+
+  // =========================================================
+  // UI
+  // =========================================================
+
+  return (
+    <div className="app">
+
+      {/* =====================================================
+          HEADER
+      ===================================================== */}
+
+      <header className="topbar">
+
+        <div className="brand">
+
+          <div className="brandIcon">
+            ✈
+          </div>
+
+          <div>
+
+            <div className="brandName">
+              SkyResolve
+            </div>
+
+            <div className="brandSub">
+              AionOS · Customer Resolution Agent
+            </div>
+
+          </div>
+
+        </div>
+
+        <div className="onlineStatus">
+
+          <span className="onlineDot" />
+
+          Agent online
+
+        </div>
+
+      </header>
+
+      {/* =====================================================
+          DEMO HEADER
+      ===================================================== */}
+
+      <section className="demoHeader">
+
+        <div>
+
+          <div className="eyebrow">
+            AIRLINE DISRUPTION DESK
+          </div>
+
+          <h1>
+            Resolve the issue.
+            <span>
+              {" "}Respect the policy.
+            </span>
+          </h1>
+
+          <p>
+            Customer-facing resolution
+            agent for disrupted journeys.
+          </p>
+
+        </div>
+
+        {/* CUSTOMER SWITCHER */}
+
+        <div className="customerTabs">
+
+          {customers.map((item) => {
+
+            const initials =
+              item.name
+                .split(" ")
+                .map(
+                  (word) =>
+                    word[0]
+                )
+                .join("");
+
+            const active =
+              customer?.booking_reference ===
+              item.booking_reference;
+
+            return (
+              <button
+                key={
+                  item.booking_reference
+                }
+
+                className={
+                  active
+                    ? "customerTab active"
+                    : "customerTab"
+                }
+
+                onClick={() =>
+                  selectCustomer(item)
+                }
+              >
+
+                <span className="tabAvatar">
+                  {initials}
+                </span>
+
+                {
+                  item.name.split(" ")[0]
+                }
+
+              </button>
+            );
+          })}
+
+        </div>
+
+      </section>
+
+      {/* =====================================================
+          MAIN LAYOUT
+      ===================================================== */}
+
+      <main className="layout">
+
+        {/* ===================================================
+            LEFT COLUMN
+        =================================================== */}
+
+        <aside className="leftColumn">
+
+          <PassengerCard
+            customer={customerView}
+          />
+
+          <FlightCard
+            customer={customerView}
+          />
+
+          {/* AGENT CAN */}
+
+          <div className="card capabilitiesCard">
+
+            <div className="sectionLabel">
+              AGENT CAN
+            </div>
+
+            <div className="capability">
+              <span>✓</span>
+              Check booking
+            </div>
+
+            <div className="capability">
+              <span>✓</span>
+              Apply airline policy
+            </div>
+
+            <div className="capability">
+              <span>✓</span>
+              Execute permitted actions
+            </div>
+
+            <div className="capability">
+              <span>✓</span>
+              Escalate restricted requests
+            </div>
+
+          </div>
+
+          {/* POLICY SNAPSHOT */}
+
+          <div className="card policyCard">
+
+            <div className="sectionLabel">
+              POLICY SNAPSHOT
+            </div>
+
+            {policySnapshot.map(
+              (policy, index) => (
+
+                <div
+                  className="policyLine"
+                  key={index}
+                >
+
+                  <span>→</span>
+
+                  {policy}
+
+                </div>
+
+              )
+            )}
+
+          </div>
+
+        </aside>
+
+        {/* ===================================================
+            CENTER CHAT
+        =================================================== */}
+
+        <Chat
+          customer={customerView}
+          messages={messages}
+          input={input}
+          setInput={setInput}
+          sendMessage={sendMessage}
+          loading={loading}
+          steps={resolutionSteps}
+        />
+
+        {/* ===================================================
+            RIGHT COLUMN
+        =================================================== */}
+
+        <aside className="rightColumn">
+
+          <ActionRecord
+            actions={actions}
+            customer={customerView}
+          />
+
+        </aside>
+
+      </main>
+
+    </div>
+  );
+}

@@ -1,0 +1,52 @@
+{
+  "cancellation_rebooking": {
+    "condition": "Flight cancelled by airline",
+    "options": [
+      "Free rebooking on the next available flight within 24 hours",
+      "Full refund"
+    ],
+    "customer_choice": true
+  },
+
+  "delay_compensation": {
+    "under_3_hours": {
+      "meal_voucher": "₹500"
+    },
+    "more_than_3_hours": {
+      "meal_voucher": true,
+      "lounge_access": true
+    },
+    "more_than_5_hours": {
+      "meal_voucher": true,
+      "lounge_access": true,
+      "hotel_accommodation": "Delayed hours only, not a full night's stay"
+    }
+  },
+
+  "refund_processing": {
+    "condition": "Airline-caused cancellation",
+    "processing_time": "Within 7 business days",
+    "payment_method": "Original payment method only"
+  },
+
+  "fare_difference": {
+    "condition": "Customer voluntarily chooses a higher-fare flight",
+    "customer_pays_difference": true,
+    "agent_waiver_limit": "₹1,500",
+    "above_limit": "Supervisor approval required"
+  },
+
+  "loyalty_tier": {
+    "gold": "Priority rebooking",
+    "platinum": "Priority rebooking",
+    "additional_compensation": false
+  },
+
+  "prohibited_actions": [
+    "Approve compensation beyond stated policy amounts",
+    "Waive fare difference above ₹1,500 without supervisor approval",
+    "Make exceptions for non-airline-caused disruptions",
+    "Handle threats of legal action or formal complaints",
+    "Process refunds to a different payment method than the original"
+  ]
+}
