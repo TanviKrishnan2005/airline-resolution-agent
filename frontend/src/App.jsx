@@ -18,14 +18,13 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
 
-  // Actions for ONLY the current conversation
   const [actions, setActions] = useState([]);
 
   const [loading, setLoading] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
 
   // =========================================================
-  // LOAD DATA
+  // INITIAL LOAD
   // =========================================================
 
   useEffect(() => {
@@ -34,25 +33,29 @@ export default function App() {
 
   async function loadData() {
     try {
-      const [customersResponse, bookingsResponse] =
+      const [customersRes, bookingsRes] =
         await Promise.all([
           fetch(`${API_URL}/customers`),
           fetch(`${API_URL}/bookings`),
         ]);
 
       const customersData =
-        await customersResponse.json();
+        await customersRes.json();
 
       const bookingsData =
-        await bookingsResponse.json();
+        await bookingsRes.json();
 
       setCustomers(customersData);
       setBookings(bookingsData);
 
       if (customersData.length > 0) {
-        selectCustomer(
-          customersData[0],
-          bookingsData
+        const firstCustomer =
+          customersData[0];
+
+        setCustomer(firstCustomer);
+
+        await loadActions(
+          firstCustomer.booking_reference
         );
       }
     } catch (error) {
@@ -66,6 +69,73 @@ export default function App() {
   }
 
   // =========================================================
+  // LOAD ACTIONS FROM BACKEND
+  // =========================================================
+
+  async function loadActions(pnr) {
+    try {
+      const response =
+        await fetch(`${API_URL}/actions`);
+
+      if (!response.ok) {
+        throw new Error(
+          `HTTP ${response.status}`
+        );
+      }
+
+      const data =
+        await response.json();
+
+      const allActions =
+        Array.isArray(data)
+          ? data
+          : data.actions || [];
+
+      const customerActions =
+        allActions.filter(
+          (action) =>
+            action.pnr === pnr
+        );
+
+      setActions(
+        removeDuplicateActions(
+          customerActions
+        )
+      );
+    } catch (error) {
+      console.error(
+        "Failed to load actions:",
+        error
+      );
+    }
+  }
+
+  // =========================================================
+  // REMOVE DUPLICATES
+  // =========================================================
+
+  function removeDuplicateActions(
+    actionList
+  ) {
+    const seen = new Set();
+
+    return actionList.filter(
+      (action) => {
+        const key =
+          `${action.pnr}|${action.action}|${action.details}`;
+
+        if (seen.has(key)) {
+          return false;
+        }
+
+        seen.add(key);
+
+        return true;
+      }
+    );
+  }
+
+  // =========================================================
   // BOOKING LOOKUP
   // =========================================================
 
@@ -73,7 +143,9 @@ export default function App() {
     customerData,
     bookingsData = bookings
   ) {
-    if (!customerData) return null;
+    if (!customerData) {
+      return null;
+    }
 
     const customerBookings =
       bookingsData.filter(
@@ -82,7 +154,6 @@ export default function App() {
           customerData.booking_reference
       );
 
-    // Prefer the disrupted booking
     const disruptedBooking =
       customerBookings.find(
         (booking) =>
@@ -98,7 +169,7 @@ export default function App() {
   }
 
   // =========================================================
-  // CUSTOMER VIEW MODEL
+  // CUSTOMER VIEW
   // =========================================================
 
   function getCustomerView(
@@ -111,7 +182,10 @@ export default function App() {
         bookingsData
       );
 
-    if (!customerData || !booking) {
+    if (
+      !customerData ||
+      !booking
+    ) {
       return null;
     }
 
@@ -175,24 +249,21 @@ export default function App() {
   // SELECT CUSTOMER
   // =========================================================
 
-  function selectCustomer(
+  async function selectCustomer(
     selectedCustomer,
     bookingsData = bookings
   ) {
-    setCustomer(selectedCustomer);
+    setCustomer(
+      selectedCustomer
+    );
 
-    // Start a completely fresh conversation
+    // Reset conversation
     setMessages([]);
-
-    // IMPORTANT:
-    // Do NOT load old actions from backend.
-    setActions([]);
-
     setInput("");
 
-    getCustomerView(
-      selectedCustomer,
-      bookingsData
+    // Load this customer's existing actions
+    await loadActions(
+      selectedCustomer.booking_reference
     );
   }
 
@@ -201,7 +272,8 @@ export default function App() {
   // =========================================================
 
   async function sendMessage() {
-    const text = input.trim();
+    const text =
+      input.trim();
 
     if (
       !text ||
@@ -211,26 +283,21 @@ export default function App() {
       return;
     }
 
-    // -------------------------------------------------------
-    // Add user message
-    // -------------------------------------------------------
-
-    setMessages((previous) => [
-      ...previous,
-      {
-        role: "user",
-        text,
-      },
-    ]);
+    // Show user message immediately
+    setMessages(
+      (previous) => [
+        ...previous,
+        {
+          role: "user",
+          text,
+        },
+      ]
+    );
 
     setInput("");
     setLoading(true);
 
     try {
-      // -----------------------------------------------------
-      // Send request to backend
-      // -----------------------------------------------------
-
       const response =
         await fetch(
           `${API_URL}/chat`,
@@ -261,54 +328,48 @@ export default function App() {
         await response.json();
 
       // -----------------------------------------------------
-      // Add agent response
+      // AGENT RESPONSE
       // -----------------------------------------------------
 
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "agent",
-
-          text:
-            data.response ||
-            "I couldn't process that request.",
-        },
-      ]);
-
-      // -----------------------------------------------------
-      // IMPORTANT:
-      //
-      // data.actions contains ONLY the actions generated
-      // by THIS request.
-      //
-      // We append them to the current conversation.
-      // We do NOT fetch the global action log.
-      // -----------------------------------------------------
-
-      if (
-        Array.isArray(data.actions) &&
-        data.actions.length > 0
-      ) {
-        setActions((previous) => [
+      setMessages(
+        (previous) => [
           ...previous,
-          ...data.actions,
-        ]);
-      }
+          {
+            role: "agent",
+            text:
+              data.response ||
+              "I couldn't process that request.",
+          },
+        ]
+      );
+
+      // -----------------------------------------------------
+      // IMPORTANT FIX
+      //
+      // Always reload backend action log.
+      // Do NOT depend only on data.actions.
+      // -----------------------------------------------------
+
+      await loadActions(
+        customer.booking_reference
+      );
+
     } catch (error) {
       console.error(
         "Chat error:",
         error
       );
 
-      setMessages((previous) => [
-        ...previous,
-        {
-          role: "agent",
-
-          text:
-            "I'm sorry, something went wrong while processing your request.",
-        },
-      ]);
+      setMessages(
+        (previous) => [
+          ...previous,
+          {
+            role: "agent",
+            text:
+              "I'm sorry, something went wrong while processing your request.",
+          },
+        ]
+      );
     } finally {
       setLoading(false);
     }
@@ -319,14 +380,19 @@ export default function App() {
   // =========================================================
 
   function getResolutionSteps() {
+    if (!customer) {
+      return [];
+    }
+
     const booking =
       getPrimaryBooking(customer);
 
-    if (!customer || !booking) {
+    if (!booking) {
       return [
         {
           type: "waiting",
-          text: "Waiting for request",
+          text:
+            "Waiting for booking",
         },
       ];
     }
@@ -335,16 +401,21 @@ export default function App() {
       messages.length > 0;
 
     const hasEscalation =
-      actions.some((action) =>
-        String(action.action || "")
-          .toLowerCase()
-          .includes("escal")
+      actions.some(
+        (action) =>
+          String(
+            action.action || ""
+          )
+            .toLowerCase()
+            .includes("escal")
       );
 
     const hasResolution =
       actions.some(
         (action) =>
-          !String(action.action || "")
+          !String(
+            action.action || ""
+          )
             .toLowerCase()
             .includes("escal")
       );
@@ -352,7 +423,8 @@ export default function App() {
     const steps = [
       {
         type: "done",
-        text: "Customer identified",
+        text:
+          "Customer identified",
       },
 
       {
@@ -362,43 +434,39 @@ export default function App() {
       },
     ];
 
-    // Nothing has been said yet
     if (!hasMessages) {
       steps.push({
         type: "waiting",
-        text: "Waiting for request",
+        text:
+          "Waiting for request",
       });
 
       return steps;
     }
 
-    // Customer has sent something
     steps.push({
       type: "done",
-      text: "Request understood",
+      text:
+        "Request understood",
     });
 
-    // Escalation
     if (hasEscalation) {
       steps.push({
         type: "warning",
-        text: "Human review required",
+        text:
+          "Human review required",
       });
-    }
-
-    // Successful policy action
-    else if (hasResolution) {
+    } else if (hasResolution) {
       steps.push({
         type: "done",
-        text: "Policy action completed",
+        text:
+          "Policy action completed",
       });
-    }
-
-    // Still processing / informational response
-    else {
+    } else {
       steps.push({
         type: "waiting",
-        text: "Processing request",
+        text:
+          "Processing request",
       });
     }
 
@@ -417,10 +485,6 @@ export default function App() {
       return [];
     }
 
-    // -------------------------------------------------------
-    // CANCELLATION
-    // -------------------------------------------------------
-
     if (
       booking.status ===
       "Cancelled"
@@ -434,10 +498,6 @@ export default function App() {
         `${customer.loyalty_tier} → priority rebooking`,
       ];
     }
-
-    // -------------------------------------------------------
-    // DELAY
-    // -------------------------------------------------------
 
     if (
       booking.status ===
@@ -471,10 +531,6 @@ export default function App() {
       return policy;
     }
 
-    // -------------------------------------------------------
-    // DEFAULT
-    // -------------------------------------------------------
-
     return [
       "Check booking",
       "Apply airline policy",
@@ -484,7 +540,7 @@ export default function App() {
   }
 
   // =========================================================
-  // LOADING SCREEN
+  // LOADING
   // =========================================================
 
   if (dataLoading) {
@@ -513,9 +569,11 @@ export default function App() {
   if (!customerView) {
     return (
       <div className="loadingScreen">
+
         <strong>
           No customer data available.
         </strong>
+
       </div>
     );
   }
@@ -533,9 +591,7 @@ export default function App() {
   return (
     <div className="app">
 
-      {/* =====================================================
-          HEADER
-      ===================================================== */}
+      {/* HEADER */}
 
       <header className="topbar">
 
@@ -560,18 +616,13 @@ export default function App() {
         </div>
 
         <div className="onlineStatus">
-
           <span className="onlineDot" />
-
           Agent online
-
         </div>
 
       </header>
 
-      {/* =====================================================
-          DEMO HEADER
-      ===================================================== */}
+      {/* DEMO HEADER */}
 
       <section className="demoHeader">
 
@@ -599,75 +650,75 @@ export default function App() {
 
         <div className="customerTabs">
 
-          {customers.map((item) => {
+          {customers.map(
+            (item) => {
 
-            const initials =
-              item.name
-                .split(" ")
-                .map(
-                  (word) =>
-                    word[0]
-                )
-                .join("");
+              const initials =
+                item.name
+                  .split(" ")
+                  .map(
+                    (word) =>
+                      word[0]
+                  )
+                  .join("");
 
-            const active =
-              customer?.booking_reference ===
-              item.booking_reference;
+              const active =
+                customer?.booking_reference ===
+                item.booking_reference;
 
-            return (
-              <button
-                key={
-                  item.booking_reference
-                }
+              return (
+                <button
+                  key={
+                    item.booking_reference
+                  }
 
-                className={
-                  active
-                    ? "customerTab active"
-                    : "customerTab"
-                }
+                  className={
+                    active
+                      ? "customerTab active"
+                      : "customerTab"
+                  }
 
-                onClick={() =>
-                  selectCustomer(item)
-                }
-              >
+                  onClick={() =>
+                    selectCustomer(item)
+                  }
+                >
 
-                <span className="tabAvatar">
-                  {initials}
-                </span>
+                  <span className="tabAvatar">
+                    {initials}
+                  </span>
 
-                {
-                  item.name.split(" ")[0]
-                }
+                  {
+                    item.name.split(" ")[0]
+                  }
 
-              </button>
-            );
-          })}
+                </button>
+              );
+            }
+          )}
 
         </div>
 
       </section>
 
-      {/* =====================================================
-          MAIN LAYOUT
-      ===================================================== */}
+      {/* MAIN */}
 
       <main className="layout">
 
-        {/* ===================================================
-            LEFT COLUMN
-        =================================================== */}
+        {/* LEFT */}
 
         <aside className="leftColumn">
 
           <PassengerCard
-            customer={customerView}
+            customer={
+              customerView
+            }
           />
 
           <FlightCard
-            customer={customerView}
+            customer={
+              customerView
+            }
           />
-
-          {/* AGENT CAN */}
 
           <div className="card capabilitiesCard">
 
@@ -697,8 +748,6 @@ export default function App() {
 
           </div>
 
-          {/* POLICY SNAPSHOT */}
-
           <div className="card policyCard">
 
             <div className="sectionLabel">
@@ -707,18 +756,13 @@ export default function App() {
 
             {policySnapshot.map(
               (policy, index) => (
-
                 <div
                   className="policyLine"
                   key={index}
                 >
-
                   <span>→</span>
-
                   {policy}
-
                 </div>
-
               )
             )}
 
@@ -726,29 +770,50 @@ export default function App() {
 
         </aside>
 
-        {/* ===================================================
-            CENTER CHAT
-        =================================================== */}
+        {/* CHAT */}
 
         <Chat
-          customer={customerView}
-          messages={messages}
-          input={input}
-          setInput={setInput}
-          sendMessage={sendMessage}
-          loading={loading}
-          steps={resolutionSteps}
+          customer={
+            customerView
+          }
+
+          messages={
+            messages
+          }
+
+          input={
+            input
+          }
+
+          setInput={
+            setInput
+          }
+
+          sendMessage={
+            sendMessage
+          }
+
+          loading={
+            loading
+          }
+
+          steps={
+            resolutionSteps
+          }
         />
 
-        {/* ===================================================
-            RIGHT COLUMN
-        =================================================== */}
+        {/* RIGHT */}
 
         <aside className="rightColumn">
 
           <ActionRecord
-            actions={actions}
-            customer={customerView}
+            actions={
+              actions
+            }
+
+            customer={
+              customerView
+            }
           />
 
         </aside>
